@@ -28,7 +28,7 @@ function getCustomFieldValue(contact, fieldName, defaultValue = "") {
   }
 }
 
-// Function to create/update a lead in Structurely from GHL
+// Function to create/update a lead in Structurely from GHL with 'raw_lead' as default
 async function syncLeadToStructurely(ghlLead) {
   try {
     logger.info(`Sending GHL lead ${ghlLead.id} to Structurely...`);
@@ -38,6 +38,11 @@ async function syncLeadToStructurely(ghlLead) {
     const priceMax = ghlLead.priceMax ? parseFloat(ghlLead.priceMax) : null;
     const bedrooms = ghlLead.bedrooms ? parseInt(ghlLead.bedrooms) : null;
     const bathrooms = ghlLead.bathrooms ? parseInt(ghlLead.bathrooms) : null;
+    
+    // Default to 'raw_lead' for all leads
+    const structurelyLeadType = 'raw_lead';
+    
+    logger.debug(`Using lead type "${structurelyLeadType}" for all leads`);
     
     // Create/update lead in Structurely with retry logic
     let retryCount = 0;
@@ -61,7 +66,7 @@ async function syncLeadToStructurely(ghlLead) {
               timeframe: ghlLead.timeframe,
               location: ghlLead.location,
               propertyType: "residential", // Valid value for Structurely
-              leadType: ghlLead.leadType || "Unknown",
+              leadType: structurelyLeadType, // Always using 'raw_lead'
               notes: ghlLead.notes
             }
           },
@@ -295,7 +300,7 @@ async function runIntegrationTest() {
       timeframe: "3-6 months",
       location: "Toronto",
       propertyType: "residential", // Using a valid value from Structurely's allowed list
-      leadType: "Buyer",
+      leadType: "raw_lead", // Using raw_lead as the default type
       notes: "Test lead created via GHL-Structurely integration"
     };
     
@@ -420,7 +425,7 @@ async function periodicSync() {
             timeframe: getCustomFieldValue(contact, "timeframe") || "",
             location: getCustomFieldValue(contact, "location") || "",
             propertyType: "residential", // Valid value for Structurely
-            leadType: getCustomFieldValue(contact, "lead_type") || "Unknown",
+            leadType: "raw_lead", // Always using raw_lead
             notes: contact.notes || ""
           };
           
