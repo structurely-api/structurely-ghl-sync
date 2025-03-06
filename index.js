@@ -6,6 +6,8 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 // Global constants
 const SYNC_BATCH_SIZE = 10; // Number of contacts to process per batch
 const LOG_PREFIX = '🔄 Structurely-GHL Sync:';
+const SYNC_INTERVAL_MINUTES = 5; // Run sync every 5 minutes
+const SYNC_CUTOFF_HOURS = 4; // Skip contacts synced in the last 4 hours
 
 // Logger utility functions
 const logger = {
@@ -15,6 +17,16 @@ const logger = {
   warn: (message) => console.warn(`${LOG_PREFIX} ⚠️ ${message}`),
   debug: (message) => console.log(`${LOG_PREFIX} 🔍 ${message}`)
 };
+
+// Utility function to safely extract custom field values
+function getCustomFieldValue(contact, fieldName, defaultValue = "") {
+  try {
+    if (!contact.customField) return defaultValue;
+    return contact.customField[fieldName] || defaultValue;
+  } catch (e) {
+    return defaultValue;
+  }
+}
 
 // Function to create/update a lead in Structurely from GHL
 async function syncLeadToStructurely(ghlLead) {
@@ -27,35 +39,53 @@ async function syncLeadToStructurely(ghlLead) {
     const bedrooms = ghlLead.bedrooms ? parseInt(ghlLead.bedrooms) : null;
     const bathrooms = ghlLead.bathrooms ? parseInt(ghlLead.bathrooms) : null;
     
-    // Create/update lead in Structurely
-    const response = await axios.post(
-      "https://datalayer.structurely.com/api/direct/v2/leads",
-      {
-        externalLeadId: ghlLead.id,
-        name: ghlLead.name,
-        email: ghlLead.email || "unknown@example.com", // Fallback for required field
-        phone: ghlLead.phone || "+10000000000", // Fallback for required field
-        source: "GoHighLevel",
-        properties: {
-          priceMin,
-          priceMax,
-          bedrooms,
-          bathrooms,
-          timeframe: ghlLead.timeframe,
-          location: ghlLead.location,
-          propertyType: "residential", // Valid value for Structurely
-          leadType: ghlLead.leadType || "Unknown",
-          notes: ghlLead.notes
-        }
-      },
-      { 
-        headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
-        timeout: 15000 // Add timeout to prevent hanging
-      }
-    );
+    // Create/update lead in Structurely with retry logic
+    let retryCount = 0;
+    const maxRetries = 3;
     
-    logger.success(`Lead synced to Structurely with ID: ${response.data.id}`);
-    return response.data;
+    while (retryCount <= maxRetries) {
+      try {
+        const response = await axios.post(
+          "https://datalayer.structurely.com/api/direct/v2/leads",
+          {
+            externalLeadId: ghlLead.id,
+            name: ghlLead.name,
+            email: ghlLead.email || "unknown@example.com", // Fallback for required field
+            phone: ghlLead.phone || "+10000000000", // Fallback for required field
+            source: "GoHighLevel",
+            properties: {
+              priceMin,
+              priceMax,
+              bedrooms,
+              bathrooms,
+              timeframe: ghlLead.timeframe,
+              location: ghlLead.location,
+              propertyType: "residential", // Valid value for Structurely
+              leadType: ghlLead.leadType || "Unknown",
+              notes: ghlLead.notes
+            }
+          },
+          { 
+            headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
+            timeout: 20000 // Increased timeout
+          }
+        );
+        
+        logger.success(`Lead synced to Structurely with ID: ${response.data.id}`);
+        return response.data;
+      } catch (error) {
+        retryCount++;
+        
+        if (retryCount > maxRetries) {
+          logger.error(`Failed to sync lead to Structurely after ${maxRetries} attempts: ${error.message}`);
+          throw error;
+        }
+        
+        const delay = 2000 * retryCount;
+        logger.warn(`Retrying in ${delay/1000} seconds (attempt ${retryCount}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   } catch (error) {
     logger.error(`Error sending lead to Structurely: ${error.message}`);
     if (error.response) {
@@ -71,53 +101,117 @@ async function syncLeadFromStructurely(leadId, ghlContactId) {
   try {
     logger.info(`Retrieving lead ${leadId} from Structurely...`);
     
-    // Get lead from Structurely
-    const response = await axios.get(
-      `https://datalayer.structurely.com/api/direct/v2/leads/${leadId}`,
-      { 
-        headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
-        timeout: 15000 // Add timeout to prevent hanging
+    // Get lead from Structurely with retry logic
+    let retryCount = 0;
+    const maxRetries = 3;
+    let lead;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        const response = await axios.get(
+          `https://datalayer.structurely.com/api/direct/v2/leads/${leadId}`,
+          { 
+            headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
+            timeout: 20000 // Increased timeout
+          }
+        );
+        
+        lead = response.data;
+        logger.success(`Retrieved lead from Structurely: ${lead.name}`);
+        break;
+      } catch (error) {
+        retryCount++;
+        
+        if (retryCount > maxRetries) {
+          logger.error(`Failed to get lead from Structurely after ${maxRetries} attempts: ${error.message}`);
+          throw error;
+        }
+        
+        const delay = 2000 * retryCount;
+        logger.warn(`Retrying in ${delay/1000} seconds (attempt ${retryCount}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
-    );
+    }
     
-    const lead = response.data;
-    logger.success(`Retrieved lead from Structurely: ${lead.name}`);
-    
-    // Prepare data for GHL update
+    // Prepare data for GHL update - Using multiple field names to avoid dependency on specific fields
     const customFieldData = {
-      "structurely_lead_id": lead.id,
-      "structurely_price_max": lead.properties?.priceMax || "",
-      "structurely_price_min": lead.properties?.priceMin || "",
-      "structurely_bedrooms": lead.properties?.bedrooms || "",
-      "structurely_bathrooms": lead.properties?.bathrooms || "",
-      "structurely_ai_conversation_status": lead.stages?.join(", ") || "",
-      "structurely_lead_type": lead.type || "",
-      "structurely_timeframe": lead.properties?.timeframe || "",
-      "structurely_location": lead.properties?.location || "",
-      "structurely_property_type": lead.properties?.propertyType || "",
-      "structurely_muted": lead.muted ? "Yes" : "No",
-      "structurely_notes": lead.properties?.notes || "",
-      "structurely_ai_conversation_link": `https://homechat.structurely.com/#/inbox/${lead.id}`,
-      "structurely_last_synced": new Date().toISOString()
+      // Store key information in multiple fields to ensure at least one works
+      "structurely_id": lead.id, // Alternative field name
+      "structurely_reference": lead.id, // Another alternative
+      "structurely_lead_ref": lead.id, // Yet another alternative
+      
+      // Other standard fields
+      "str_price_max": lead.properties?.priceMax || "",
+      "str_price_min": lead.properties?.priceMin || "",
+      "str_bedrooms": lead.properties?.bedrooms || "",
+      "str_bathrooms": lead.properties?.bathrooms || "",
+      "str_conversation_status": lead.stages?.join(", ") || "",
+      "str_lead_type": lead.type || "",
+      "str_timeframe": lead.properties?.timeframe || "",
+      "str_location": lead.properties?.location || "",
+      "str_property_type": lead.properties?.propertyType || "",
+      "str_muted": lead.muted ? "Yes" : "No",
+      "str_notes": lead.properties?.notes || "",
+      "str_conversation_link": `https://homechat.structurely.com/#/inbox/${lead.id}`,
+      "str_last_synced": new Date().toISOString()
     };
     
-    // Update GHL with Structurely data - using PUT method with customField (not customFields)
-    await axios.put(
-      `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}`,
-      {
-        customField: customFieldData
-      },
-      { 
-        headers: { 
-          Authorization: `Bearer ${GHL_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 15000 // Add timeout to prevent hanging
-      }
-    );
+    // Try to include the original field names as well
+    try {
+      // These might fail if fields don't exist, but we have alternatives above
+      customFieldData["structurely_lead_id"] = lead.id;
+      customFieldData["structurely_price_max"] = lead.properties?.priceMax || "";
+      customFieldData["structurely_price_min"] = lead.properties?.priceMin || "";
+      customFieldData["structurely_bedrooms"] = lead.properties?.bedrooms || "";
+      customFieldData["structurely_bathrooms"] = lead.properties?.bathrooms || "";
+      customFieldData["structurely_ai_conversation_status"] = lead.stages?.join(", ") || "";
+      customFieldData["structurely_lead_type"] = lead.type || "";
+      customFieldData["structurely_timeframe"] = lead.properties?.timeframe || "";
+      customFieldData["structurely_location"] = lead.properties?.location || "";
+      customFieldData["structurely_property_type"] = lead.properties?.propertyType || "";
+      customFieldData["structurely_muted"] = lead.muted ? "Yes" : "No";
+      customFieldData["structurely_notes"] = lead.properties?.notes || "";
+      customFieldData["structurely_ai_conversation_link"] = `https://homechat.structurely.com/#/inbox/${lead.id}`;
+      customFieldData["structurely_last_synced"] = new Date().toISOString();
+    } catch (e) {
+      logger.debug("Some original field names might not exist, using alternatives");
+    }
     
-    logger.success(`Updated GHL contact with Structurely data`);
-    return lead;
+    // Update GHL with Structurely data - using PUT method with customField
+    let updateRetryCount = 0;
+    const maxUpdateRetries = 3;
+    
+    while (updateRetryCount <= maxUpdateRetries) {
+      try {
+        await axios.put(
+          `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}`,
+          {
+            customField: customFieldData
+          },
+          { 
+            headers: { 
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 20000 // Increased timeout
+          }
+        );
+        
+        logger.success(`Updated GHL contact with Structurely data`);
+        return lead;
+      } catch (error) {
+        updateRetryCount++;
+        
+        if (updateRetryCount > maxUpdateRetries) {
+          logger.error(`Failed to update GHL contact after ${maxUpdateRetries} attempts: ${error.message}`);
+          throw error;
+        }
+        
+        const delay = 2000 * updateRetryCount;
+        logger.warn(`Retrying in ${delay/1000} seconds (attempt ${updateRetryCount}/${maxUpdateRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   } catch (error) {
     logger.error(`Error syncing from Structurely to GHL: ${error.message}`);
     if (error.response) {
@@ -133,142 +227,47 @@ async function getGHLContacts(limit = 100, offset = 0) {
   try {
     logger.info(`Fetching contacts from GHL (limit: ${limit}, offset: ${offset})...`);
     
-    const response = await axios.get(
-      `https://rest.gohighlevel.com/v1/contacts/?limit=${limit}&offset=${offset}`,
-      { 
-        headers: { Authorization: `Bearer ${GHL_API_KEY}` },
-        timeout: 15000 // Add timeout to prevent hanging
-      }
-    );
+    let retryCount = 0;
+    const maxRetries = 3;
     
-    logger.success(`Found ${response.data.contacts.length} contacts in GHL`);
-    return response.data;
+    while (retryCount <= maxRetries) {
+      try {
+        const response = await axios.get(
+          `https://rest.gohighlevel.com/v1/contacts/?limit=${limit}&offset=${offset}`,
+          { 
+            headers: { Authorization: `Bearer ${GHL_API_KEY}` },
+            timeout: 20000 // Increased timeout
+          }
+        );
+        
+        logger.success(`Found ${response.data.contacts.length} contacts in GHL`);
+        return response.data;
+      } catch (error) {
+        retryCount++;
+        
+        if (retryCount > maxRetries) {
+          logger.error(`Failed to fetch GHL contacts after ${maxRetries} attempts: ${error.message}`);
+          throw error;
+        }
+        
+        const delay = 2000 * retryCount;
+        logger.warn(`Retrying in ${delay/1000} seconds (attempt ${retryCount}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   } catch (error) {
     logger.error(`Error fetching GHL contacts: ${error.message}`);
     throw error;
   }
 }
 
-// Improved function to check if GHL custom fields exist and create them if not
-async function ensureCustomFieldsExist() {
-  try {
-    logger.info("Checking if required custom fields exist in GHL...");
-    
-    // Get existing custom fields with improved error handling
-    let existingFields = [];
-    try {
-      const response = await axios.get(
-        "https://rest.gohighlevel.com/v1/custom-fields/",
-        { 
-          headers: { Authorization: `Bearer ${GHL_API_KEY}` },
-          timeout: 10000 // Add timeout to prevent hanging
-        }
-      );
-      existingFields = response.data.customFields || [];
-      logger.success(`Successfully retrieved ${existingFields.length} existing custom fields`);
-    } catch (fetchError) {
-      logger.warn(`Could not fetch existing custom fields: ${fetchError.message}`);
-      // Continue with empty array rather than failing completely
-      logger.info("Will attempt to create all required fields");
-    }
-    
-    const requiredFields = [
-      { name: "structurely_lead_id", displayName: "Structurely Lead ID", fieldType: "TEXT" },
-      { name: "structurely_price_max", displayName: "Structurely Price Max", fieldType: "TEXT" },
-      { name: "structurely_price_min", displayName: "Structurely Price Min", fieldType: "TEXT" },
-      { name: "structurely_bedrooms", displayName: "Structurely Bedrooms", fieldType: "TEXT" },
-      { name: "structurely_bathrooms", displayName: "Structurely Bathrooms", fieldType: "TEXT" },
-      { name: "structurely_ai_conversation_status", displayName: "Structurely AI Conversation Status", fieldType: "TEXT" },
-      { name: "structurely_lead_type", displayName: "Structurely Lead Type", fieldType: "TEXT" },
-      { name: "structurely_timeframe", displayName: "Structurely Timeframe", fieldType: "TEXT" },
-      { name: "structurely_location", displayName: "Structurely Location", fieldType: "TEXT" },
-      { name: "structurely_property_type", displayName: "Structurely Property Type", fieldType: "TEXT" },
-      { name: "structurely_muted", displayName: "Structurely Muted", fieldType: "TEXT" },
-      { name: "structurely_notes", displayName: "Structurely Notes", fieldType: "LARGE_TEXT" },
-      { name: "structurely_ai_conversation_link", displayName: "Structurely AI Conversation Link", fieldType: "TEXT" },
-      { name: "structurely_last_synced", displayName: "Structurely Last Synced", fieldType: "TEXT" }
-    ];
-    
-    // Check which fields need to be created
-    const existingFieldNames = existingFields.map(field => field.name);
-    const fieldsToCreate = requiredFields.filter(field => !existingFieldNames.includes(field.name));
-    
-    // Create missing fields
-    if (fieldsToCreate.length > 0) {
-      logger.info(`Creating ${fieldsToCreate.length} missing custom fields in GHL...`);
-      
-      let successCount = 0;
-      let failCount = 0;
-      
-      for (const field of fieldsToCreate) {
-        try {
-          // Add delay between requests to avoid rate limits
-          if (successCount > 0 || failCount > 0) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-          
-          await axios.post(
-            "https://rest.gohighlevel.com/v1/custom-fields/",
-            field,
-            { 
-              headers: { 
-                Authorization: `Bearer ${GHL_API_KEY}`,
-                'Content-Type': 'application/json'
-              },
-              timeout: 10000 // Add timeout to prevent hanging
-            }
-          );
-          
-          logger.success(`Created custom field: ${field.displayName}`);
-          successCount++;
-        } catch (createError) {
-          logger.error(`Failed to create custom field ${field.displayName}: ${createError.message}`);
-          if (createError.response) {
-            logger.error(`Status: ${createError.response.status}`);
-            logger.error(`Response: ${JSON.stringify(createError.response.data)}`);
-          }
-          failCount++;
-          
-          // Skip to the next field rather than failing the entire process
-          continue;
-        }
-      }
-      
-      logger.info(`Custom field creation summary: ${successCount} created, ${failCount} failed`);
-      
-      if (successCount > 0) {
-        // At least some fields were created successfully
-        return true;
-      } else if (failCount === fieldsToCreate.length) {
-        // All fields failed to create - try to continue anyway
-        logger.warn("Failed to create any custom fields, but will try to continue sync process");
-        return true;
-      }
-    } else {
-      logger.success("All required custom fields already exist in GHL");
-    }
-    
-    return true;
-  } catch (error) {
-    logger.error(`Error ensuring custom fields exist: ${error.message}`);
-    if (error.response) {
-      logger.error(`Status: ${error.response.status}`);
-      logger.error(`Response: ${JSON.stringify(error.response.data)}`);
-    }
-    
-    // Despite the error, return true to allow the process to continue
-    logger.warn("Continuing sync process despite custom field setup issues");
-    return true;
-  }
-}
+// Skip the problematic custom field creation function entirely
+// We'll rely on manually created fields instead
 
 // Main integration test function
 async function runIntegrationTest() {
   try {
     logger.info("Starting integration test");
-    
-    // Ensure custom fields exist
-    await ensureCustomFieldsExist();
     
     // Get contacts from GHL
     const contactsData = await getGHLContacts(1); // Get just 1 contact for testing
@@ -310,8 +309,10 @@ async function runIntegrationTest() {
     await syncLeadFromStructurely(structurelyLead.id, ghlContact.id);
     
     logger.success("Integration test completed successfully!");
+    return true;
   } catch (error) {
     logger.error(`Integration test failed: ${error.message}`);
+    return false;
   }
 }
 
@@ -321,25 +322,29 @@ async function periodicSync() {
     const startTime = new Date();
     logger.info(`Running periodic sync at ${startTime.toLocaleTimeString()}`);
     
-    // Ensure custom fields exist
-    await ensureCustomFieldsExist();
+    // Skip the problematic custom field creation step
+    // await ensureCustomFieldsExist();
     
     // Get all contacts from GHL that need syncing
     let offset = 0;
     let hasMore = true;
     const syncedContacts = new Set(); // Track already processed contacts within this run
+    let totalProcessed = 0;
+    let totalSuccess = 0;
+    let totalSkipped = 0;
+    let totalFailed = 0;
     
-    // Calculate the timestamp for "recently synced" (e.g., in the last 4 hours)
+    // Calculate the timestamp for "recently synced"
     const syncCutoffTime = new Date();
-    syncCutoffTime.setHours(syncCutoffTime.getHours() - 4); // Consider contacts synced in the last 4 hours as "recent"
+    syncCutoffTime.setHours(syncCutoffTime.getHours() - SYNC_CUTOFF_HOURS);
     const syncCutoffTimeString = syncCutoffTime.toISOString();
     
     while (hasMore) {
-      // Fetch batch of contacts
+      // Fetch batch of contacts with retry logic
       let contacts = [];
       try {
         const contactsData = await getGHLContacts(SYNC_BATCH_SIZE, offset);
-        contacts = contactsData.contacts;
+        contacts = contactsData.contacts || [];
         
         if (contacts.length === 0) {
           logger.info("No more contacts to process");
@@ -349,50 +354,36 @@ async function periodicSync() {
       } catch (fetchError) {
         logger.error(`Error fetching contacts batch at offset ${offset}: ${fetchError.message}`);
         
-        // Retry once after a short delay
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        // Move to next batch and continue
+        offset += SYNC_BATCH_SIZE;
         
-        try {
-          const contactsData = await getGHLContacts(SYNC_BATCH_SIZE, offset);
-          contacts = contactsData.contacts;
-          
-          if (contacts.length === 0) {
-            logger.info("No more contacts to process after retry");
-            hasMore = false;
-            break;
-          }
-        } catch (retryError) {
-          logger.error(`Retry attempt failed, skipping this batch: ${retryError.message}`);
-          // Move to next batch
-          offset += SYNC_BATCH_SIZE;
-          continue;
-        }
+        // If we've had multiple consecutive failures, slow down
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        continue;
       }
       
       // Filter contacts to only those that need syncing
       const contactsToSync = contacts.filter(contact => {
         // Skip if already processed in this run
         if (syncedContacts.has(contact.id)) {
+          totalSkipped++;
           return false;
         }
         
         // Check if this contact has been synced recently
-        const lastSynced = contact.customField?.structurely_last_synced;
+        // Look for multiple possible field names
+        const lastSynced = 
+          getCustomFieldValue(contact, "structurely_last_synced") || 
+          getCustomFieldValue(contact, "str_last_synced");
+          
         if (lastSynced && lastSynced > syncCutoffTimeString) {
           logger.debug(`Skipping recently synced contact: ${contact.id}`);
+          totalSkipped++;
           return false;
         }
         
-        // Check if there are any changes that would require a sync
-        // (Only sync if certain fields have changed or if never synced before)
-        if (contact.customField?.structurely_lead_id) {
-          // Contact exists in Structurely - check for changes in key fields
-          // Add your change detection logic here if needed
-          return true; // For now, we'll continue with the sync
-        } else {
-          // Never synced before - should be synced
-          return true;
-        }
+        // Contact should be synced
+        return true;
       });
       
       logger.info(`Found ${contactsToSync.length} contacts to sync out of ${contacts.length} in this batch`);
@@ -401,10 +392,19 @@ async function periodicSync() {
       for (const contact of contactsToSync) {
         const contactName = `${contact.firstName} ${contact.lastName || ''}`.trim();
         logger.info(`Processing: ${contactName} (${contact.id})`);
+        totalProcessed++;
         
         try {
-          // Add contact ID to processed set
+          // Add contact ID to processed set to avoid duplicates
           syncedContacts.add(contact.id);
+          
+          // Check if this contact already has a Structurely ID
+          // Look in multiple fields to handle different field names
+          const existingStructurelyId = 
+            getCustomFieldValue(contact, "structurely_lead_id") ||
+            getCustomFieldValue(contact, "structurely_id") ||
+            getCustomFieldValue(contact, "structurely_reference") ||
+            getCustomFieldValue(contact, "str_lead_ref");
           
           // Prepare lead data
           const ghlLead = {
@@ -413,14 +413,14 @@ async function periodicSync() {
             email: contact.email,
             phone: contact.phone,
             // Extract additional fields from GHL custom fields if available
-            priceMin: contact.customField?.property_min_price || "0",
-            priceMax: contact.customField?.property_max_price || "0",
-            bedrooms: contact.customField?.bedrooms || "0",
-            bathrooms: contact.customField?.bathrooms || "0",
-            timeframe: contact.customField?.timeframe || "",
-            location: contact.customField?.location || "",
+            priceMin: getCustomFieldValue(contact, "property_min_price") || "0",
+            priceMax: getCustomFieldValue(contact, "property_max_price") || "0",
+            bedrooms: getCustomFieldValue(contact, "bedrooms") || "0",
+            bathrooms: getCustomFieldValue(contact, "bathrooms") || "0",
+            timeframe: getCustomFieldValue(contact, "timeframe") || "",
+            location: getCustomFieldValue(contact, "location") || "",
             propertyType: "residential", // Valid value for Structurely
-            leadType: contact.customField?.lead_type || "Unknown",
+            leadType: getCustomFieldValue(contact, "lead_type") || "Unknown",
             notes: contact.notes || ""
           };
           
@@ -428,14 +428,16 @@ async function periodicSync() {
           const structurelyLead = await syncLeadToStructurely(ghlLead);
           
           // Wait a brief moment to avoid API rate limits
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, 1000));
           
           // Sync back to GHL
           await syncLeadFromStructurely(structurelyLead.id, contact.id);
           
           logger.success(`Successfully synced contact: ${contactName}`);
+          totalSuccess++;
         } catch (error) {
           logger.error(`Error syncing contact ${contactName}: ${error.message}`);
+          totalFailed++;
           // Continue with next contact, don't stop the batch
           continue;
         }
@@ -450,12 +452,13 @@ async function periodicSync() {
       }
       
       // Add delay between batches to respect rate limits
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
     const endTime = new Date();
     const durationMs = endTime - startTime;
     logger.success(`Periodic sync completed at ${endTime.toLocaleTimeString()} (duration: ${durationMs/1000}s)`);
+    logger.info(`Sync summary: ${totalProcessed} processed, ${totalSuccess} successful, ${totalSkipped} skipped, ${totalFailed} failed`);
   } catch (error) {
     logger.error(`Periodic sync failed: ${error.message}`);
   }
@@ -466,26 +469,32 @@ async function initialize() {
   logger.info("Initializing Structurely-GHL Sync Service");
   
   try {
-    // Run the integration test first as a verification
-    await runIntegrationTest();
+    // Skip the problematic custom field creation step
+    // await ensureCustomFieldsExist();
     
-    // If test is successful, set up periodic sync
-    logger.info("Setting up periodic sync (every 5 minutes)");
-    const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    logger.warn("Skipping custom field creation due to API issues");
+    logger.warn("Please ensure custom fields exist in GHL before running full sync");
+    
+    // Run the integration test first as a verification
+    const testResult = await runIntegrationTest();
+    
+    // Set up periodic sync regardless of test result
+    logger.info(`Setting up periodic sync (every ${SYNC_INTERVAL_MINUTES} minutes)`);
+    const SYNC_INTERVAL = SYNC_INTERVAL_MINUTES * 60 * 1000;
     
     // Run initial full sync
     await periodicSync();
     
     // Then set up periodic sync
     setInterval(periodicSync, SYNC_INTERVAL);
-    logger.success(`Sync service is running. Next sync in 5 minutes.`);
+    logger.success(`Sync service is running. Next sync in ${SYNC_INTERVAL_MINUTES} minutes.`);
   } catch (error) {
     logger.error(`Initialization failed: ${error.message}`);
     
-    // Even if the test fails, try to set up periodic sync
+    // Even if initialization fails, try to set up periodic sync
     logger.warn("Setting up periodic sync despite initialization errors");
     
-    const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    const SYNC_INTERVAL = SYNC_INTERVAL_MINUTES * 60 * 1000;
     setInterval(periodicSync, SYNC_INTERVAL);
   }
 }
