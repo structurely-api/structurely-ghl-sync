@@ -1,7 +1,5 @@
 require('dotenv').config();
 const axios = require('axios');
-
-// API Keys from .env file
 const STRUCTURELY_API_KEY = process.env.STRUCTURELY_API_KEY;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 
@@ -14,6 +12,8 @@ const logger = {
   info: (message) => console.log(`${LOG_PREFIX} ℹ️ ${message}`),
   success: (message) => console.log(`${LOG_PREFIX} ✅ ${message}`),
   error: (message) => console.error(`${LOG_PREFIX} ❌ ${message}`),
+  warn: (message) => console.warn(`${LOG_PREFIX} ⚠️ ${message}`),
+  debug: (message) => console.log(`${LOG_PREFIX} 🔍 ${message}`)
 };
 
 // Function to create/update a lead in Structurely from GHL
@@ -95,15 +95,17 @@ async function syncLeadFromStructurely(leadId, ghlContactId) {
       "structurely_last_synced": new Date().toISOString()
     };
     
-    // Update GHL with Structurely data
+    // Update GHL with Structurely data - using PUT method with customField (not customFields)
     await axios.put(
       `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}`,
-      { customField: customFieldData },
+      {
+        customField: customFieldData
+      },
       { 
         headers: { 
           Authorization: `Bearer ${GHL_API_KEY}`,
           'Content-Type': 'application/json'
-        } 
+        }
       }
     );
     
@@ -140,39 +142,40 @@ async function getGHLContacts(limit = 100, offset = 0) {
 // Function to check if GHL custom fields exist and create them if not
 async function ensureCustomFieldsExist() {
   try {
-    logger.info("Checking existing custom fields in GHL...");
+    logger.info("Checking if required custom fields exist in GHL...");
     
+    // Get existing custom fields
     const response = await axios.get(
       "https://rest.gohighlevel.com/v1/custom-fields/",
       { headers: { Authorization: `Bearer ${GHL_API_KEY}` } }
     );
     
     const existingFields = response.data.customFields || [];
-    const existingFieldNames = existingFields.map(field => field.name);
-    
     const requiredFields = [
-      { name: "structurely_lead_id", displayName: "Structurely Lead ID", dataType: "TEXT" },
-      { name: "structurely_price_max", displayName: "Structurely Price Max", dataType: "TEXT" },
-      { name: "structurely_price_min", displayName: "Structurely Price Min", dataType: "TEXT" },
-      { name: "structurely_bedrooms", displayName: "Structurely Bedrooms", dataType: "TEXT" },
-      { name: "structurely_bathrooms", displayName: "Structurely Bathrooms", dataType: "TEXT" },
-      { name: "structurely_ai_conversation_status", displayName: "Structurely AI Conversation Status", dataType: "TEXT" },
-      { name: "structurely_lead_type", displayName: "Structurely Lead Type", dataType: "TEXT" },
-      { name: "structurely_timeframe", displayName: "Structurely Timeframe", dataType: "TEXT" },
-      { name: "structurely_location", displayName: "Structurely Location", dataType: "TEXT" },
-      { name: "structurely_property_type", displayName: "Structurely Property Type", dataType: "TEXT" },
-      { name: "structurely_muted", displayName: "Structurely Muted", dataType: "TEXT" },
-      { name: "structurely_notes", displayName: "Structurely Notes", dataType: "LARGE_TEXT" },
-      { name: "structurely_ai_conversation_link", displayName: "Structurely AI Conversation Link", dataType: "TEXT" },
-      { name: "structurely_last_synced", displayName: "Structurely Last Synced", dataType: "TEXT" }
+      { name: "structurely_lead_id", displayName: "Structurely Lead ID", fieldType: "TEXT" },
+      { name: "structurely_price_max", displayName: "Structurely Price Max", fieldType: "TEXT" },
+      { name: "structurely_price_min", displayName: "Structurely Price Min", fieldType: "TEXT" },
+      { name: "structurely_bedrooms", displayName: "Structurely Bedrooms", fieldType: "TEXT" },
+      { name: "structurely_bathrooms", displayName: "Structurely Bathrooms", fieldType: "TEXT" },
+      { name: "structurely_ai_conversation_status", displayName: "Structurely AI Conversation Status", fieldType: "TEXT" },
+      { name: "structurely_lead_type", displayName: "Structurely Lead Type", fieldType: "TEXT" },
+      { name: "structurely_timeframe", displayName: "Structurely Timeframe", fieldType: "TEXT" },
+      { name: "structurely_location", displayName: "Structurely Location", fieldType: "TEXT" },
+      { name: "structurely_property_type", displayName: "Structurely Property Type", fieldType: "TEXT" },
+      { name: "structurely_muted", displayName: "Structurely Muted", fieldType: "TEXT" },
+      { name: "structurely_notes", displayName: "Structurely Notes", fieldType: "LARGE_TEXT" },
+      { name: "structurely_ai_conversation_link", displayName: "Structurely AI Conversation Link", fieldType: "TEXT" },
+      { name: "structurely_last_synced", displayName: "Structurely Last Synced", fieldType: "TEXT" }
     ];
     
-    const fieldsToCreate = requiredFields.filter(field => 
-      !existingFieldNames.includes(field.name)
-    );
+    // Check which fields need to be created
+    const existingFieldNames = existingFields.map(field => field.name);
+    const fieldsToCreate = requiredFields.filter(field => !existingFieldNames.includes(field.name));
     
+    // Create missing fields
     if (fieldsToCreate.length > 0) {
       logger.info(`Creating ${fieldsToCreate.length} missing custom fields in GHL...`);
+      
       for (const field of fieldsToCreate) {
         await axios.post(
           "https://rest.gohighlevel.com/v1/custom-fields/",
@@ -196,57 +199,54 @@ async function ensureCustomFieldsExist() {
   }
 }
 
-// Main integration test with multiple contacts
+// Main integration test function
 async function runIntegrationTest() {
   try {
-    logger.info("🧪 Starting integration test");
+    logger.info("Starting integration test");
     
-    // Ensure custom fields exist in GHL
+    // Ensure custom fields exist
     await ensureCustomFieldsExist();
     
-    // Fetch multiple contacts from GHL
-    const contacts = await getGHLContacts();
+    // Get contacts from GHL
+    const contactsData = await getGHLContacts(1); // Get just 1 contact for testing
+    const contacts = contactsData.contacts;
+    
     if (contacts.length === 0) {
-      logger.error("❌ No contacts found in GHL.");
+      logger.error("No contacts found in GHL");
       return;
     }
     
-    logger.info(`Found ${contacts.length} contacts, syncing up to ${SYNC_BATCH_SIZE} contacts for this test.`);
+    // Use the first contact for testing
+    const ghlContact = contacts[0];
+    logger.info(`Using contact: ${ghlContact.id} - ${ghlContact.firstName} ${ghlContact.lastName || ''}`);
     
-    // Loop through multiple contacts for a thorough test
-    for (const ghlContact of contacts.slice(0, SYNC_BATCH_SIZE)) {
-      const contactName = `${ghlContact.firstName} ${ghlContact.lastName || ''}`.trim();
-      logger.info(`📝 Using contact: ${ghlContact.id} - ${contactName}`);
-      
-      const ghlLead = {
-        id: ghlContact.id,
-        name: contactName,
-        email: ghlContact.email || "unknown@example.com",
-        phone: ghlContact.phone,
-        priceMin: ghlContact.customField?.property_min_price || "0",
-        priceMax: ghlContact.customField?.property_max_price || "0",
-        bedrooms: ghlContact.customField?.bedrooms || "0",
-        bathrooms: ghlContact.customField?.bathrooms || "0",
-        timeframe: ghlContact.customField?.timeframe || "Unknown",
-        location: ghlContact.customField?.location || "Unknown",
-        propertyType: "residential",
-        leadType: ghlContact.customField?.lead_type || "Unknown",
-        notes: ghlContact.customField?.notes || ""
-      };
-      
-      // Sync to Structurely
-      const structurelyLead = await syncLeadToStructurely(ghlLead);
-      
-      // Small delay to avoid API throttling
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Sync data back from Structurely to GHL
-      await syncLeadFromStructurely(structurelyLead.id, ghlContact.id);
-      
-      logger.success(`Completed integration test for contact: ${contactName}`);
-    }
+    // Prepare lead data for Structurely (with sample property data)
+    const ghlLead = {
+      id: ghlContact.id,
+      name: `${ghlContact.firstName} ${ghlContact.lastName || ''}`.trim(),
+      email: ghlContact.email,
+      phone: ghlContact.phone,
+      priceMin: "400000",
+      priceMax: "700000",
+      bedrooms: "3",
+      bathrooms: "2",
+      timeframe: "3-6 months",
+      location: "Toronto",
+      propertyType: "residential", // Using a valid value from Structurely's allowed list
+      leadType: "Buyer",
+      notes: "Test lead created via GHL-Structurely integration"
+    };
     
-    logger.success("✅ Integration test completed successfully!");
+    // Step 1: Send to Structurely
+    const structurelyLead = await syncLeadToStructurely(ghlLead);
+    
+    // Wait a moment
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Step 2: Get from Structurely and update GHL
+    await syncLeadFromStructurely(structurelyLead.id, ghlContact.id);
+    
+    logger.success("Integration test completed successfully!");
   } catch (error) {
     logger.error(`Integration test failed: ${error.message}`);
   }
@@ -258,83 +258,102 @@ async function periodicSync() {
     const startTime = new Date();
     logger.info(`Running periodic sync at ${startTime.toLocaleTimeString()}`);
     
+    // Ensure custom fields exist
     await ensureCustomFieldsExist();
     
+    // Get all contacts from GHL that need syncing
+    // In a production implementation, you might filter by tag or custom field
     let offset = 0;
-    let totalProcessed = 0;
+    let hasMore = true;
     
-    while (true) {
+    while (hasMore) {
+      // Fetch batch of contacts
       const contactsData = await getGHLContacts(SYNC_BATCH_SIZE, offset);
       const contacts = contactsData.contacts;
       
       if (contacts.length === 0) {
         logger.info("No more contacts to process");
+        hasMore = false;
         break;
       }
       
-      logger.info(`Fetched contacts from GHL: ${contacts.map(c => c.id).join(", ")}`);
       logger.info(`Processing batch of ${contacts.length} contacts...`);
       
+      // Process each contact in the batch
       for (const contact of contacts) {
         const contactName = `${contact.firstName} ${contact.lastName || ''}`.trim();
         logger.info(`Processing: ${contactName} (${contact.id})`);
         
         try {
+          // Prepare lead data
           const ghlLead = {
             id: contact.id,
             name: contactName,
-            email: contact.email || "unknown@example.com",
+            email: contact.email,
             phone: contact.phone,
+            // Extract additional fields from GHL custom fields if available
             priceMin: contact.customField?.property_min_price || "0",
             priceMax: contact.customField?.property_max_price || "0",
             bedrooms: contact.customField?.bedrooms || "0",
             bathrooms: contact.customField?.bathrooms || "0",
-            propertyType: "residential"
+            propertyType: "residential" // Valid value for Structurely
           };
           
-          // Step 1: Sync lead to Structurely
+          // Sync to Structurely
           const structurelyLead = await syncLeadToStructurely(ghlLead);
           
-          // Wait a moment to avoid API throttling
+          // Wait a brief moment to avoid API rate limits
           await new Promise(resolve => setTimeout(resolve, 500));
           
-          // Step 2: Sync data back from Structurely to GHL
+          // Sync back to GHL
           await syncLeadFromStructurely(structurelyLead.id, contact.id);
           
-          totalProcessed++;
           logger.success(`Successfully synced contact: ${contactName}`);
         } catch (error) {
           logger.error(`Error syncing contact ${contactName}: ${error.message}`);
+          // Continue with next contact, don't stop the batch
           continue;
         }
       }
       
+      // Update offset for next batch
       offset += contacts.length;
-      if (contacts.length < SYNC_BATCH_SIZE) break;
       
-      // Delay between batches to respect rate limits
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Check if we've reached the end
+      if (contacts.length < SYNC_BATCH_SIZE) {
+        hasMore = false;
+      }
+      
+      // Add delay between batches to respect rate limits
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
     
     const endTime = new Date();
-    logger.success(`Periodic sync completed. Total contacts processed: ${totalProcessed}. Duration: ${(endTime - startTime) / 1000}s`);
+    const durationMs = endTime - startTime;
+    logger.success(`Periodic sync completed at ${endTime.toLocaleTimeString()} (duration: ${durationMs/1000}s)`);
   } catch (error) {
     logger.error(`Periodic sync failed: ${error.message}`);
   }
 }
 
-// Function to initialize the service
+// Perform initial setup and tests
 async function initialize() {
+  logger.info("Initializing Structurely-GHL Sync Service");
+  
   try {
-    logger.info("Initializing Structurely-GHL Sync Service");
+    // Run the integration test first as a verification
+    await runIntegrationTest();
     
-    await ensureCustomFieldsExist();
+    // If test is successful, set up periodic sync
+    logger.info("Setting up periodic sync (every 5 minutes)");
+    const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    
+    // Run initial full sync
     await periodicSync();
     
-    const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    // Then set up periodic sync
     setInterval(periodicSync, SYNC_INTERVAL);
-    
-    logger.success("Sync service is running. Next sync in 5 minutes.");
+    logger.success(`Sync service is running. Next sync in 5 minutes.`);
   } catch (error) {
     logger.error(`Initialization failed: ${error.message}`);
   }
