@@ -48,7 +48,10 @@ async function syncLeadToStructurely(ghlLead) {
           notes: ghlLead.notes
         }
       },
-      { headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` } }
+      { 
+        headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
+        timeout: 15000 // Add timeout to prevent hanging
+      }
     );
     
     logger.success(`Lead synced to Structurely with ID: ${response.data.id}`);
@@ -71,7 +74,10 @@ async function syncLeadFromStructurely(leadId, ghlContactId) {
     // Get lead from Structurely
     const response = await axios.get(
       `https://datalayer.structurely.com/api/direct/v2/leads/${leadId}`,
-      { headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` } }
+      { 
+        headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
+        timeout: 15000 // Add timeout to prevent hanging
+      }
     );
     
     const lead = response.data;
@@ -105,7 +111,8 @@ async function syncLeadFromStructurely(leadId, ghlContactId) {
         headers: { 
           Authorization: `Bearer ${GHL_API_KEY}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000 // Add timeout to prevent hanging
       }
     );
     
@@ -128,7 +135,10 @@ async function getGHLContacts(limit = 100, offset = 0) {
     
     const response = await axios.get(
       `https://rest.gohighlevel.com/v1/contacts/?limit=${limit}&offset=${offset}`,
-      { headers: { Authorization: `Bearer ${GHL_API_KEY}` } }
+      { 
+        headers: { Authorization: `Bearer ${GHL_API_KEY}` },
+        timeout: 15000 // Add timeout to prevent hanging
+      }
     );
     
     logger.success(`Found ${response.data.contacts.length} contacts in GHL`);
@@ -139,18 +149,29 @@ async function getGHLContacts(limit = 100, offset = 0) {
   }
 }
 
-// Function to check if GHL custom fields exist and create them if not
+// Improved function to check if GHL custom fields exist and create them if not
 async function ensureCustomFieldsExist() {
   try {
     logger.info("Checking if required custom fields exist in GHL...");
     
-    // Get existing custom fields
-    const response = await axios.get(
-      "https://rest.gohighlevel.com/v1/custom-fields/",
-      { headers: { Authorization: `Bearer ${GHL_API_KEY}` } }
-    );
+    // Get existing custom fields with improved error handling
+    let existingFields = [];
+    try {
+      const response = await axios.get(
+        "https://rest.gohighlevel.com/v1/custom-fields/",
+        { 
+          headers: { Authorization: `Bearer ${GHL_API_KEY}` },
+          timeout: 10000 // Add timeout to prevent hanging
+        }
+      );
+      existingFields = response.data.customFields || [];
+      logger.success(`Successfully retrieved ${existingFields.length} existing custom fields`);
+    } catch (fetchError) {
+      logger.warn(`Could not fetch existing custom fields: ${fetchError.message}`);
+      // Continue with empty array rather than failing completely
+      logger.info("Will attempt to create all required fields");
+    }
     
-    const existingFields = response.data.customFields || [];
     const requiredFields = [
       { name: "structurely_lead_id", displayName: "Structurely Lead ID", fieldType: "TEXT" },
       { name: "structurely_price_max", displayName: "Structurely Price Max", fieldType: "TEXT" },
@@ -176,13 +197,52 @@ async function ensureCustomFieldsExist() {
     if (fieldsToCreate.length > 0) {
       logger.info(`Creating ${fieldsToCreate.length} missing custom fields in GHL...`);
       
+      let successCount = 0;
+      let failCount = 0;
+      
       for (const field of fieldsToCreate) {
-        await axios.post(
-          "https://rest.gohighlevel.com/v1/custom-fields/",
-          field,
-          { headers: { Authorization: `Bearer ${GHL_API_KEY}` } }
-        );
-        logger.success(`Created custom field: ${field.displayName}`);
+        try {
+          // Add delay between requests to avoid rate limits
+          if (successCount > 0 || failCount > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+          
+          await axios.post(
+            "https://rest.gohighlevel.com/v1/custom-fields/",
+            field,
+            { 
+              headers: { 
+                Authorization: `Bearer ${GHL_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 10000 // Add timeout to prevent hanging
+            }
+          );
+          
+          logger.success(`Created custom field: ${field.displayName}`);
+          successCount++;
+        } catch (createError) {
+          logger.error(`Failed to create custom field ${field.displayName}: ${createError.message}`);
+          if (createError.response) {
+            logger.error(`Status: ${createError.response.status}`);
+            logger.error(`Response: ${JSON.stringify(createError.response.data)}`);
+          }
+          failCount++;
+          
+          // Skip to the next field rather than failing the entire process
+          continue;
+        }
+      }
+      
+      logger.info(`Custom field creation summary: ${successCount} created, ${failCount} failed`);
+      
+      if (successCount > 0) {
+        // At least some fields were created successfully
+        return true;
+      } else if (failCount === fieldsToCreate.length) {
+        // All fields failed to create - try to continue anyway
+        logger.warn("Failed to create any custom fields, but will try to continue sync process");
+        return true;
       }
     } else {
       logger.success("All required custom fields already exist in GHL");
@@ -195,7 +255,10 @@ async function ensureCustomFieldsExist() {
       logger.error(`Status: ${error.response.status}`);
       logger.error(`Response: ${JSON.stringify(error.response.data)}`);
     }
-    throw error;
+    
+    // Despite the error, return true to allow the process to continue
+    logger.warn("Continuing sync process despite custom field setup issues");
+    return true;
   }
 }
 
@@ -273,13 +336,37 @@ async function periodicSync() {
     
     while (hasMore) {
       // Fetch batch of contacts
-      const contactsData = await getGHLContacts(SYNC_BATCH_SIZE, offset);
-      const contacts = contactsData.contacts;
-      
-      if (contacts.length === 0) {
-        logger.info("No more contacts to process");
-        hasMore = false;
-        break;
+      let contacts = [];
+      try {
+        const contactsData = await getGHLContacts(SYNC_BATCH_SIZE, offset);
+        contacts = contactsData.contacts;
+        
+        if (contacts.length === 0) {
+          logger.info("No more contacts to process");
+          hasMore = false;
+          break;
+        }
+      } catch (fetchError) {
+        logger.error(`Error fetching contacts batch at offset ${offset}: ${fetchError.message}`);
+        
+        // Retry once after a short delay
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        try {
+          const contactsData = await getGHLContacts(SYNC_BATCH_SIZE, offset);
+          contacts = contactsData.contacts;
+          
+          if (contacts.length === 0) {
+            logger.info("No more contacts to process after retry");
+            hasMore = false;
+            break;
+          }
+        } catch (retryError) {
+          logger.error(`Retry attempt failed, skipping this batch: ${retryError.message}`);
+          // Move to next batch
+          offset += SYNC_BATCH_SIZE;
+          continue;
+        }
       }
       
       // Filter contacts to only those that need syncing
@@ -394,6 +481,12 @@ async function initialize() {
     logger.success(`Sync service is running. Next sync in 5 minutes.`);
   } catch (error) {
     logger.error(`Initialization failed: ${error.message}`);
+    
+    // Even if the test fails, try to set up periodic sync
+    logger.warn("Setting up periodic sync despite initialization errors");
+    
+    const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
+    setInterval(periodicSync, SYNC_INTERVAL);
   }
 }
 
