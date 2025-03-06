@@ -252,7 +252,7 @@ async function runIntegrationTest() {
   }
 }
 
-// Function for periodic syncing
+// Function for periodic syncing - FIXED VERSION
 async function periodicSync() {
   try {
     const startTime = new Date();
@@ -262,9 +262,14 @@ async function periodicSync() {
     await ensureCustomFieldsExist();
     
     // Get all contacts from GHL that need syncing
-    // In a production implementation, you might filter by tag or custom field
     let offset = 0;
     let hasMore = true;
+    const syncedContacts = new Set(); // Track already processed contacts within this run
+    
+    // Calculate the timestamp for "recently synced" (e.g., in the last 4 hours)
+    const syncCutoffTime = new Date();
+    syncCutoffTime.setHours(syncCutoffTime.getHours() - 4); // Consider contacts synced in the last 4 hours as "recent"
+    const syncCutoffTimeString = syncCutoffTime.toISOString();
     
     while (hasMore) {
       // Fetch batch of contacts
@@ -277,14 +282,43 @@ async function periodicSync() {
         break;
       }
       
-      logger.info(`Processing batch of ${contacts.length} contacts...`);
+      // Filter contacts to only those that need syncing
+      const contactsToSync = contacts.filter(contact => {
+        // Skip if already processed in this run
+        if (syncedContacts.has(contact.id)) {
+          return false;
+        }
+        
+        // Check if this contact has been synced recently
+        const lastSynced = contact.customField?.structurely_last_synced;
+        if (lastSynced && lastSynced > syncCutoffTimeString) {
+          logger.debug(`Skipping recently synced contact: ${contact.id}`);
+          return false;
+        }
+        
+        // Check if there are any changes that would require a sync
+        // (Only sync if certain fields have changed or if never synced before)
+        if (contact.customField?.structurely_lead_id) {
+          // Contact exists in Structurely - check for changes in key fields
+          // Add your change detection logic here if needed
+          return true; // For now, we'll continue with the sync
+        } else {
+          // Never synced before - should be synced
+          return true;
+        }
+      });
       
-      // Process each contact in the batch
-      for (const contact of contacts) {
+      logger.info(`Found ${contactsToSync.length} contacts to sync out of ${contacts.length} in this batch`);
+      
+      // Process each contact that needs syncing
+      for (const contact of contactsToSync) {
         const contactName = `${contact.firstName} ${contact.lastName || ''}`.trim();
         logger.info(`Processing: ${contactName} (${contact.id})`);
         
         try {
+          // Add contact ID to processed set
+          syncedContacts.add(contact.id);
+          
           // Prepare lead data
           const ghlLead = {
             id: contact.id,
@@ -296,7 +330,11 @@ async function periodicSync() {
             priceMax: contact.customField?.property_max_price || "0",
             bedrooms: contact.customField?.bedrooms || "0",
             bathrooms: contact.customField?.bathrooms || "0",
-            propertyType: "residential" // Valid value for Structurely
+            timeframe: contact.customField?.timeframe || "",
+            location: contact.customField?.location || "",
+            propertyType: "residential", // Valid value for Structurely
+            leadType: contact.customField?.lead_type || "Unknown",
+            notes: contact.notes || ""
           };
           
           // Sync to Structurely
