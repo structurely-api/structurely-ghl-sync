@@ -32,16 +32,17 @@ function getCustomFieldValue(contact, fieldName, defaultValue = "") {
   }
 }
 
-// Function to generate a widget URL with JWT for a lead - exactly matching Structurely's example
-function generateWidgetUrl(lead) {
+// Function to generate a widget URL with JWT for a lead - enhanced with structurely ID
+function generateWidgetUrl(lead, structurelyLeadId) {
   try {
-    // Create payload exactly as shown in Structurely's documentation
+    // Create an enhanced payload with required information
     const payload = {
       lead: {
         name: lead.name,
         phone: lead.phone || "+10000000000",
         email: lead.email || "unknown@example.com",
-        externalLeadId: lead.id
+        externalLeadId: lead.id,
+        id: structurelyLeadId // Include the Structurely ID explicitly
       }
     };
     
@@ -51,12 +52,12 @@ function generateWidgetUrl(lead) {
     const token = jwt.sign(
       payload,
       STRUCTURELY_SECRET_KEY,
-      { algorithm: 'HS512', expiresIn: '2 mins', keyid: 'embedded-app' }
+      { algorithm: 'HS512', expiresIn: '30d', keyid: 'embedded-app' }
     );
     
     // Generate the URL with the token
     const widgetUrl = `${STRUCTURELY_EMBED_URL}?authorization=${token}`;
-    logger.debug(`Generated widget URL for lead ${lead.id}`);
+    logger.debug(`Generated widget URL for lead ${lead.id} / ${structurelyLeadId}`);
     
     return widgetUrl;
   } catch (error) {
@@ -95,6 +96,9 @@ async function syncLeadToStructurely(ghlLead) {
             email: ghlLead.email || "unknown@example.com", // Fallback for required field
             phone: ghlLead.phone || "+10000000000", // Fallback for required field
             source: "GoHighLevel",
+            // Add enrollment information 
+            enrollInConversation: true, // Try to trigger enrollment
+            conversationName: "Aisa", // Structurely's AI assistant name
             properties: {
               priceMin,
               priceMax,
@@ -175,34 +179,27 @@ async function syncLeadFromStructurely(leadId, ghlContactId, ghlLead) {
       }
     }
     
-    // Generate widget URL for this lead - Using Structurely's lead ID to match their example
+    // Generate widget URL with both IDs (GHL and Structurely)
     const widgetUrl = generateWidgetUrl({
-      id: lead.id, // Use Structurely's lead ID instead of GHL ID
+      id: ghlContactId,
       name: lead.name,
       email: lead.email || ghlLead.email || "unknown@example.com",
       phone: lead.phone || ghlLead.phone || "+10000000000"
-    });
+    }, lead.id); // Pass the Structurely lead ID as second param
     
-    // Create HTML for iframe display in the note
-    const widgetIframeHtml = widgetUrl ? 
-      `<iframe src="${widgetUrl}" width="100%" height="600" frameborder="0"></iframe>` : 
-      '';
+    // Get direct conversation URL as a fallback
+    const directConversationUrl = `https://homechat.structurely.com/#/inbox/${lead.id}`;
     
-    // Create alternative link (in case iframe doesn't work)
-    const widgetLinkHtml = widgetUrl ? 
-      `<p><a href="${widgetUrl}" target="_blank">Open Structurely Widget in New Tab</a></p>` : 
-      '';
-    
-    // Create note with widget link and information
+    // Create note with both widget and direct links
     const noteContent = `
-<p><strong>Structurely Widget for ${ghlLead.name}</strong></p>
-${widgetLinkHtml}
-<p>For best results, click the link above to open in a new tab.</p>
+<p><strong>Structurely Conversation for ${ghlLead.name}</strong></p>
+<p><a href="${widgetUrl}" target="_blank">Open Structurely Widget</a></p>
+<p><a href="${directConversationUrl}" target="_blank">Open Direct Conversation (if widget doesn't work)</a></p>
 <p>Structurely Lead ID: ${lead.id}</p>
 <p>Last synced: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
 `;
     
-    // Add a note to the contact with the widget link
+    // Add a note to the contact with the links
     if (widgetUrl) {
       try {
         await axios.post(
@@ -217,9 +214,9 @@ ${widgetLinkHtml}
             }
           }
         );
-        logger.success(`Added widget link note to contact ${ghlContactId}`);
+        logger.success(`Added widget and conversation links to contact ${ghlContactId}`);
       } catch (noteError) {
-        logger.error(`Failed to add note with widget link: ${noteError.message}`);
+        logger.error(`Failed to add note with links: ${noteError.message}`);
         // Continue even if note creation fails
       }
     }
@@ -233,6 +230,7 @@ ${widgetLinkHtml}
       
       // Store the widget URL in custom fields too
       "structurely_widget_url": widgetUrl || "",
+      "structurely_direct_url": directConversationUrl,
       
       // Other standard fields
       "str_price_max": lead.properties?.priceMax || "",
@@ -246,7 +244,7 @@ ${widgetLinkHtml}
       "str_property_type": lead.properties?.propertyType || "",
       "str_muted": lead.muted ? "Yes" : "No",
       "str_notes": lead.properties?.notes || "",
-      "str_conversation_link": `https://homechat.structurely.com/#/inbox/${lead.id}`,
+      "str_conversation_link": directConversationUrl,
       "str_last_synced": new Date().toISOString()
     };
     
@@ -255,6 +253,7 @@ ${widgetLinkHtml}
       // These might fail if fields don't exist, but we have alternatives above
       customFieldData["structurely_lead_id"] = lead.id;
       customFieldData["structurely_widget_link"] = widgetUrl || "";
+      customFieldData["structurely_conversation_url"] = directConversationUrl;
       customFieldData["structurely_price_max"] = lead.properties?.priceMax || "";
       customFieldData["structurely_price_min"] = lead.properties?.priceMin || "";
       customFieldData["structurely_bedrooms"] = lead.properties?.bedrooms || "";
@@ -266,7 +265,7 @@ ${widgetLinkHtml}
       customFieldData["structurely_property_type"] = lead.properties?.propertyType || "";
       customFieldData["structurely_muted"] = lead.muted ? "Yes" : "No";
       customFieldData["structurely_notes"] = lead.properties?.notes || "";
-      customFieldData["structurely_ai_conversation_link"] = `https://homechat.structurely.com/#/inbox/${lead.id}`;
+      customFieldData["structurely_ai_conversation_link"] = directConversationUrl;
       customFieldData["structurely_last_synced"] = new Date().toISOString();
     } catch (e) {
       logger.debug("Some original field names might not exist, using alternatives");
@@ -314,6 +313,50 @@ ${widgetLinkHtml}
       logger.error(`Response: ${JSON.stringify(error.response.data)}`);
     }
     throw error;
+  }
+}
+
+// Function to enroll lead in conversation if needed
+async function enrollLeadInConversation(leadId) {
+  try {
+    logger.info(`Attempting to enroll lead ${leadId} in Structurely conversation...`);
+    
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        const response = await axios.post(
+          `https://datalayer.structurely.com/api/direct/v2/leads/${leadId}/enroll`,
+          {
+            conversationName: "Aisa" // Default Structurely AI assistant
+          },
+          { 
+            headers: { Authorization: `Bearer ${STRUCTURELY_API_KEY}` },
+            timeout: 20000
+          }
+        );
+        
+        logger.success(`Successfully enrolled lead ${leadId} in conversation`);
+        return response.data;
+      } catch (error) {
+        retryCount++;
+        
+        if (retryCount > maxRetries) {
+          logger.error(`Failed to enroll lead after ${maxRetries} attempts: ${error.message}`);
+          // Don't throw error, as this might be expected if already enrolled
+          return null;
+        }
+        
+        const delay = 2000 * retryCount;
+        logger.warn(`Retrying enrollment in ${delay/1000} seconds (attempt ${retryCount}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  } catch (error) {
+    logger.error(`Error enrolling lead in conversation: ${error.message}`);
+    // Continue even if enrollment fails - it might already be enrolled
+    return null;
   }
 }
 
@@ -400,7 +443,13 @@ async function runIntegrationTest() {
     // Wait a moment
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Step 2: Get from Structurely and update GHL
+    // Step 2: Try to explicitly enroll in conversation
+    await enrollLeadInConversation(structurelyLead.id);
+    
+    // Wait a moment
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Step 3: Get from Structurely and update GHL
     await syncLeadFromStructurely(structurelyLead.id, ghlContact.id, ghlLead);
     
     logger.success("Integration test completed successfully!");
@@ -521,6 +570,9 @@ async function periodicSync() {
           
           // Sync to Structurely
           const structurelyLead = await syncLeadToStructurely(ghlLead);
+          
+          // Try to enroll lead in conversation
+          await enrollLeadInConversation(structurelyLead.id);
           
           // Wait a brief moment to avoid API rate limits
           await new Promise(resolve => setTimeout(resolve, 1000));
