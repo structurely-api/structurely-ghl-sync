@@ -1,6 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
-const jwt = require('jsonwebtoken'); // Add JWT library
+const jwt = require('jsonwebtoken');
 const STRUCTURELY_API_KEY = process.env.STRUCTURELY_API_KEY;
 const GHL_API_KEY = process.env.GHL_API_KEY;
 // Add Structurely embedded app credentials
