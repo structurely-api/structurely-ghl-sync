@@ -32,10 +32,10 @@ function getCustomFieldValue(contact, fieldName, defaultValue = "") {
   }
 }
 
-// NEW: Function to generate a widget URL with JWT for a lead
+// Function to generate a widget URL with JWT for a lead - exactly matching Structurely's example
 function generateWidgetUrl(lead) {
   try {
-    // Create payload for JWT
+    // Create payload exactly as shown in Structurely's documentation
     const payload = {
       lead: {
         name: lead.name,
@@ -45,11 +45,13 @@ function generateWidgetUrl(lead) {
       }
     };
     
-    // Sign the JWT
+    logger.debug(`JWT Payload: ${JSON.stringify(payload)}`);
+    
+    // Sign the JWT using their exact parameters
     const token = jwt.sign(
       payload,
       STRUCTURELY_SECRET_KEY,
-      { algorithm: 'HS512', expiresIn: '30d', keyid: 'embedded-app' }
+      { algorithm: 'HS512', expiresIn: '2 mins', keyid: 'embedded-app' }
     );
     
     // Generate the URL with the token
@@ -173,23 +175,29 @@ async function syncLeadFromStructurely(leadId, ghlContactId, ghlLead) {
       }
     }
     
-    // Generate widget URL for this lead
+    // Generate widget URL for this lead - Using Structurely's lead ID to match their example
     const widgetUrl = generateWidgetUrl({
-      id: ghlContactId,
-      name: ghlLead.name,
-      email: ghlLead.email,
-      phone: ghlLead.phone
+      id: lead.id, // Use Structurely's lead ID instead of GHL ID
+      name: lead.name,
+      email: lead.email || ghlLead.email || "unknown@example.com",
+      phone: lead.phone || ghlLead.phone || "+10000000000"
     });
     
-    // Create widget HTML link for notes
-    const widgetHtmlLink = widgetUrl ? 
-      `<p><a href="${widgetUrl}" target="_blank">Open Structurely Widget</a></p>` : 
+    // Create HTML for iframe display in the note
+    const widgetIframeHtml = widgetUrl ? 
+      `<iframe src="${widgetUrl}" width="100%" height="600" frameborder="0"></iframe>` : 
+      '';
+    
+    // Create alternative link (in case iframe doesn't work)
+    const widgetLinkHtml = widgetUrl ? 
+      `<p><a href="${widgetUrl}" target="_blank">Open Structurely Widget in New Tab</a></p>` : 
       '';
     
     // Create note with widget link and information
     const noteContent = `
 <p><strong>Structurely Widget for ${ghlLead.name}</strong></p>
-${widgetHtmlLink}
+${widgetLinkHtml}
+<p>For best results, click the link above to open in a new tab.</p>
 <p>Structurely Lead ID: ${lead.id}</p>
 <p>Last synced: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
 `;
