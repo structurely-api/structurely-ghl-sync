@@ -1,7 +1,11 @@
 require('dotenv').config();
 const axios = require('axios');
+const jwt = require('jsonwebtoken'); // Add JWT library
 const STRUCTURELY_API_KEY = process.env.STRUCTURELY_API_KEY;
 const GHL_API_KEY = process.env.GHL_API_KEY;
+// Add Structurely embedded app credentials
+const STRUCTURELY_EMBED_URL = 'https://embedded.structurely.com/structurely/67a72e1c4cbeee2a15689fd9';
+const STRUCTURELY_SECRET_KEY = 'ehgTqzYnSTy059RG62hWGxD2AJPvle3fAyQkWWOzePQ6PoK5HQRplL8CffirfbdJ';
 
 // Global constants
 const SYNC_BATCH_SIZE = 10; // Number of contacts to process per batch
@@ -28,7 +32,38 @@ function getCustomFieldValue(contact, fieldName, defaultValue = "") {
   }
 }
 
-// Function to create/update a lead in Structurely from GHL with 'raw_lead' as default
+// NEW: Function to generate a widget URL with JWT for a lead
+function generateWidgetUrl(lead) {
+  try {
+    // Create payload for JWT
+    const payload = {
+      lead: {
+        name: lead.name,
+        phone: lead.phone || "+10000000000",
+        email: lead.email || "unknown@example.com",
+        externalLeadId: lead.id
+      }
+    };
+    
+    // Sign the JWT
+    const token = jwt.sign(
+      payload,
+      STRUCTURELY_SECRET_KEY,
+      { algorithm: 'HS512', expiresIn: '30d', keyid: 'embedded-app' }
+    );
+    
+    // Generate the URL with the token
+    const widgetUrl = `${STRUCTURELY_EMBED_URL}?authorization=${token}`;
+    logger.debug(`Generated widget URL for lead ${lead.id}`);
+    
+    return widgetUrl;
+  } catch (error) {
+    logger.error(`Error generating widget URL: ${error.message}`);
+    return null;
+  }
+}
+
+// Function to create/update a lead in Structurely from GHL with 'buyer' as default
 async function syncLeadToStructurely(ghlLead) {
   try {
     logger.info(`Sending GHL lead ${ghlLead.id} to Structurely...`);
@@ -39,8 +74,8 @@ async function syncLeadToStructurely(ghlLead) {
     const bedrooms = ghlLead.bedrooms ? parseInt(ghlLead.bedrooms) : null;
     const bathrooms = ghlLead.bathrooms ? parseInt(ghlLead.bathrooms) : null;
     
-    // Default to 'raw_lead' for all leads
-    const structurelyLeadType = 'raw_lead';
+    // Default to 'buyer' for all leads
+    const structurelyLeadType = 'buyer';
     
     logger.debug(`Using lead type "${structurelyLeadType}" for all leads`);
     
@@ -66,7 +101,7 @@ async function syncLeadToStructurely(ghlLead) {
               timeframe: ghlLead.timeframe,
               location: ghlLead.location,
               propertyType: "residential", // Valid value for Structurely
-              leadType: structurelyLeadType, // Always using 'raw_lead'
+              leadType: structurelyLeadType, // Always using 'buyer'
               notes: ghlLead.notes
             }
           },
@@ -102,7 +137,7 @@ async function syncLeadToStructurely(ghlLead) {
 }
 
 // Function to get a lead from Structurely by ID and update GHL
-async function syncLeadFromStructurely(leadId, ghlContactId) {
+async function syncLeadFromStructurely(leadId, ghlContactId, ghlLead) {
   try {
     logger.info(`Retrieving lead ${leadId} from Structurely...`);
     
@@ -138,12 +173,58 @@ async function syncLeadFromStructurely(leadId, ghlContactId) {
       }
     }
     
+    // Generate widget URL for this lead
+    const widgetUrl = generateWidgetUrl({
+      id: ghlContactId,
+      name: ghlLead.name,
+      email: ghlLead.email,
+      phone: ghlLead.phone
+    });
+    
+    // Create widget HTML link for notes
+    const widgetHtmlLink = widgetUrl ? 
+      `<p><a href="${widgetUrl}" target="_blank">Open Structurely Widget</a></p>` : 
+      '';
+    
+    // Create note with widget link and information
+    const noteContent = `
+<p><strong>Structurely Widget for ${ghlLead.name}</strong></p>
+${widgetHtmlLink}
+<p>Structurely Lead ID: ${lead.id}</p>
+<p>Last synced: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
+`;
+    
+    // Add a note to the contact with the widget link
+    if (widgetUrl) {
+      try {
+        await axios.post(
+          `https://rest.gohighlevel.com/v1/contacts/${ghlContactId}/notes`,
+          {
+            body: noteContent
+          },
+          { 
+            headers: { 
+              Authorization: `Bearer ${GHL_API_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        logger.success(`Added widget link note to contact ${ghlContactId}`);
+      } catch (noteError) {
+        logger.error(`Failed to add note with widget link: ${noteError.message}`);
+        // Continue even if note creation fails
+      }
+    }
+    
     // Prepare data for GHL update - Using multiple field names to avoid dependency on specific fields
     const customFieldData = {
       // Store key information in multiple fields to ensure at least one works
       "structurely_id": lead.id, // Alternative field name
       "structurely_reference": lead.id, // Another alternative
       "structurely_lead_ref": lead.id, // Yet another alternative
+      
+      // Store the widget URL in custom fields too
+      "structurely_widget_url": widgetUrl || "",
       
       // Other standard fields
       "str_price_max": lead.properties?.priceMax || "",
@@ -165,6 +246,7 @@ async function syncLeadFromStructurely(leadId, ghlContactId) {
     try {
       // These might fail if fields don't exist, but we have alternatives above
       customFieldData["structurely_lead_id"] = lead.id;
+      customFieldData["structurely_widget_link"] = widgetUrl || "";
       customFieldData["structurely_price_max"] = lead.properties?.priceMax || "";
       customFieldData["structurely_price_min"] = lead.properties?.priceMin || "";
       customFieldData["structurely_bedrooms"] = lead.properties?.bedrooms || "";
@@ -300,7 +382,7 @@ async function runIntegrationTest() {
       timeframe: "3-6 months",
       location: "Toronto",
       propertyType: "residential", // Using a valid value from Structurely's allowed list
-      leadType: "raw_lead", // Using raw_lead as the default type
+      leadType: "buyer", // Using buyer as the default type
       notes: "Test lead created via GHL-Structurely integration"
     };
     
@@ -311,7 +393,7 @@ async function runIntegrationTest() {
     await new Promise(resolve => setTimeout(resolve, 2000));
     
     // Step 2: Get from Structurely and update GHL
-    await syncLeadFromStructurely(structurelyLead.id, ghlContact.id);
+    await syncLeadFromStructurely(structurelyLead.id, ghlContact.id, ghlLead);
     
     logger.success("Integration test completed successfully!");
     return true;
@@ -425,7 +507,7 @@ async function periodicSync() {
             timeframe: getCustomFieldValue(contact, "timeframe") || "",
             location: getCustomFieldValue(contact, "location") || "",
             propertyType: "residential", // Valid value for Structurely
-            leadType: "raw_lead", // Always using raw_lead
+            leadType: "buyer", // Always using buyer
             notes: contact.notes || ""
           };
           
@@ -436,7 +518,7 @@ async function periodicSync() {
           await new Promise(resolve => setTimeout(resolve, 1000));
           
           // Sync back to GHL
-          await syncLeadFromStructurely(structurelyLead.id, contact.id);
+          await syncLeadFromStructurely(structurelyLead.id, contact.id, ghlLead);
           
           logger.success(`Successfully synced contact: ${contactName}`);
           totalSuccess++;
